@@ -1,0 +1,109 @@
+import React from 'react';
+import { motion } from 'motion/react';
+import { TrendingUp, TrendingDown, Wallet } from 'lucide-react';
+import { Stock, StockHolding } from '../types';
+import { formatCurrency } from '../utils';
+
+interface StockCardProps {
+  stock: Stock;
+  price: number;
+  history: number[];
+  holding: StockHolding;
+  money: number;
+  onBuy: (amount: number) => void;
+  onSell: (amount: number) => void;
+}
+
+export const StockCard: React.FC<StockCardProps> = ({
+  stock,
+  price,
+  history,
+  holding,
+  money,
+  onBuy,
+  onSell
+}) => {
+  const previousPrice = history[history.length - 2] || price;
+  const change = ((price - previousPrice) / previousPrice) * 100;
+  const isUp = change >= 0;
+
+  const maxAffordable = Math.floor(money / price);
+
+  return (
+    <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition-all">
+      <div className="flex justify-between items-start mb-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="font-black text-slate-900 tracking-tight">{stock.name}</h3>
+            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 ${stock.color}`}>
+              {stock.symbol}
+            </span>
+          </div>
+          <p className="text-2xl font-black text-slate-800 mt-1">{formatCurrency(price)}</p>
+        </div>
+        <div className={`flex items-center gap-1 font-bold text-sm ${isUp ? 'text-emerald-500' : 'text-rose-500'}`}>
+          {isUp ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
+          {isUp ? '+' : ''}{change.toFixed(2)}%
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3 p-3 bg-slate-50 rounded-xl mb-6 border border-slate-100">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2 text-slate-500">
+            <Wallet className="w-4 h-4" />
+            <span className="text-xs font-bold uppercase tracking-wider">Your Position</span>
+          </div>
+          <div className="text-right">
+            <p className="text-sm font-black text-slate-800">{holding.shares} Shares</p>
+            <p className="text-[10px] font-bold text-slate-400">Equity: {formatCurrency(holding.shares * price)}</p>
+          </div>
+        </div>
+        
+        {holding.shares > 0 && (
+          <div className="flex items-center justify-between pt-2 border-t border-slate-200">
+            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Profit/Loss</div>
+            <div className="text-right">
+              <p className={`text-xs font-black ${price >= holding.avgBuyPrice ? 'text-emerald-500' : 'text-rose-500'}`}>
+                {price >= holding.avgBuyPrice ? '+' : ''}{formatCurrency((price - holding.avgBuyPrice) * holding.shares)}
+              </p>
+              <p className={`text-[9px] font-bold ${price >= holding.avgBuyPrice ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {price >= holding.avgBuyPrice ? '+' : ''}{(((price - holding.avgBuyPrice) / holding.avgBuyPrice) * 100).toFixed(2)}%
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
+        <button
+          onClick={() => onBuy(1)}
+          disabled={money < price}
+          className="py-2.5 bg-slate-900 text-white rounded-lg font-bold text-xs uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition-all"
+        >
+          Buy 1
+        </button>
+        <button
+          onClick={() => onSell(1)}
+          disabled={holding.shares <= 0}
+          className="py-2.5 bg-white border border-slate-200 text-slate-600 rounded-lg font-bold text-xs uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 transition-all"
+        >
+          Sell 1
+        </button>
+        <button
+          onClick={() => onBuy(maxAffordable)}
+          disabled={maxAffordable <= 0}
+          className="py-2 bg-emerald-500/10 text-emerald-600 rounded-lg font-black text-[10px] uppercase tracking-widest disabled:opacity-30 transition-all"
+        >
+          Buy Max ({maxAffordable})
+        </button>
+        <button
+          onClick={() => onSell(holding.shares)}
+          disabled={holding.shares <= 0}
+          className="py-2 bg-rose-500/10 text-rose-600 rounded-lg font-black text-[10px] uppercase tracking-widest disabled:opacity-30 transition-all"
+        >
+          Sell All
+        </button>
+      </div>
+    </div>
+  );
+};

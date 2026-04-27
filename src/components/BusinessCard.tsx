@@ -9,21 +9,25 @@ interface BusinessCardProps {
   owned: OwnedBusiness;
   canAfford: boolean;
   prestigePoints: number;
+  multiplier?: number;
   onUpgrade: () => void;
   onManualCollect: () => void;
 }
 
 export const BusinessCard: React.FC<BusinessCardProps> = ({
   business,
-  owned,
+  owned: ownedIn,
   canAfford,
   prestigePoints,
+  multiplier = 1,
   onUpgrade,
   onManualCollect,
 }) => {
+  const owned = ownedIn || { id: business.id, level: 0, lastCollected: Date.now(), isAutomated: true, speedMultiplier: 1, profitMultiplier: 1 };
   const IconComponent = (Icons as any)[business.icon] || Icons.Circle;
   const cost = calculateCost(business.baseCost, owned.level);
-  const income = calculateIncome(business.baseIncome, owned.level, owned.profitMultiplier, prestigePoints);
+  let income = calculateIncome(business.baseIncome, owned.level, owned.profitMultiplier, prestigePoints);
+  income *= multiplier;
   
   const isLocked = owned.level === 0;
 
@@ -43,7 +47,15 @@ export const BusinessCard: React.FC<BusinessCardProps> = ({
             </div>
             <div>
               <h3 className="font-bold text-lg text-slate-800 leading-tight">{business.name}</h3>
-              <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Level {owned.level}</p>
+              <div className="flex items-center gap-1.5">
+                <p className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Level {owned.level}</p>
+                {owned.profitMultiplier > 1 && (
+                  <div className="flex items-center text-[8px] font-black text-rose-500 uppercase tracking-tighter bg-rose-50 px-1 rounded">
+                    <Icons.TrendingUp className="w-2 h-2 mr-0.5" />
+                    {owned.profitMultiplier}x
+                  </div>
+                )}
+              </div>
             </div>
           </div>
           <div className="text-right">

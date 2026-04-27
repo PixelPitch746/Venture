@@ -15,3 +15,13 @@ export const calculateIncome = (baseIncome: number, level: number, multiplier: n
   const prestigeBonus = 1 + (prestigePoints * 0.01); // 1% bonus per prestige point
   return baseIncome * level * multiplier * prestigeBonus;
 };
+
+export const formatGameDate = (days: number): string => {
+  const startDate = new Date(2000, 0, 1);
+  const currentDate = new Date(startDate.getTime() + days * 24 * 60 * 60 * 1000);
+  return currentDate.toLocaleDateString('en-US', { 
+    month: 'long', 
+    day: 'numeric', 
+    year: 'numeric' 
+  });
+};

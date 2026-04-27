@@ -3,6 +3,7 @@ import { motion } from 'motion/react';
 import { TrendingUp, TrendingDown, Wallet } from 'lucide-react';
 import { Stock, StockHolding } from '../types';
 import { formatCurrency } from '../utils';
+import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 interface StockCardProps {
   stock: Stock;
@@ -27,11 +28,13 @@ export const StockCard: React.FC<StockCardProps> = ({
   const change = ((price - previousPrice) / previousPrice) * 100;
   const isUp = change >= 0;
 
+  const chartData = history.map((val, i) => ({ val, i }));
+
   const maxAffordable = Math.floor(money / price);
 
   return (
     <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition-all">
-      <div className="flex justify-between items-start mb-4">
+      <div className="flex justify-between items-start mb-2">
         <div>
           <div className="flex items-center gap-2">
             <h3 className="font-black text-slate-900 tracking-tight">{stock.name}</h3>
@@ -45,6 +48,28 @@ export const StockCard: React.FC<StockCardProps> = ({
           {isUp ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
           {isUp ? '+' : ''}{change.toFixed(2)}%
         </div>
+      </div>
+
+      <div className="h-16 w-full mb-6">
+        <ResponsiveContainer width="100%" height="100%">
+          <AreaChart data={chartData}>
+            <defs>
+              <linearGradient id={`colorStock-${stock.id}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor={isUp ? '#10b981' : '#f43f5e'} stopOpacity={0.2}/>
+                <stop offset="95%" stopColor={isUp ? '#10b981' : '#f43f5e'} stopOpacity={0}/>
+              </linearGradient>
+            </defs>
+            <Area 
+              type="monotone" 
+              dataKey="val" 
+              stroke={isUp ? '#10b981' : '#f43f5e'} 
+              strokeWidth={2} 
+              fillOpacity={1} 
+              fill={`url(#colorStock-${stock.id})`} 
+              isAnimationActive={false}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
 
       <div className="flex flex-col gap-3 p-3 bg-slate-50 rounded-xl mb-6 border border-slate-100">

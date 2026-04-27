@@ -51,17 +51,60 @@ export interface RivalState {
   lastExpansion: number;
 }
 
+export interface HypeEvent {
+  id: string;
+  name: string;
+  multiplier: number;
+  description: string;
+  color: string;
+}
+
+export interface House {
+  id: string;
+  name: string;
+  description: string;
+  basePrice: number;
+  monthlyRent: number;
+  appreciationRate: number; // monthly appreciation factor
+  color: string;
+  icon: string;
+}
+
+export interface Property {
+  id: string;
+  houseId: string;
+  purchasePrice: number;
+  purchaseDate: number; // days count
+}
+
+export interface LeaderboardEntry {
+  uid: string;
+  displayName: string;
+  wealth: number;
+  lastUpdated: any;
+}
+
 export interface GameState {
   money: number;
   totalEarned: number;
+  gameDate: number; // days since 2000-01-01
   prestigePoints: number;
   prestigeCount: number;
   ownedBusinesses: Record<string, OwnedBusiness>;
   holdings: Record<string, StockHolding>;
+  properties: Property[];
   stockPrices: Record<string, number>;
   stockHistory: Record<string, number[]>;
   portfolioHistory: { time: string; val: number }[];
   rivals: Record<string, RivalState>;
+  clickLevel: number;
+  activeEvent: HypeEvent | null;
+  eventTimeLeft: number; // in seconds
+  unlockedFeatures: {
+    market: boolean;
+    stocks: boolean;
+    prestige: boolean;
+  };
   lastSaved: number;
   currentCityIndex: number;
 }

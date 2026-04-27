@@ -1,15 +1,16 @@
 import React from 'react';
-import { Award } from 'lucide-react';
-import { formatCurrency } from '../utils';
+import { Award, Calendar } from 'lucide-react';
+import { formatCurrency, formatGameDate } from '../utils';
 import { motion } from 'motion/react';
 
 interface StatsHeaderProps {
   money: number;
   incomePerSec: number;
   prestigePoints: number;
+  gameDate: number;
 }
 
-export const StatsHeader: React.FC<StatsHeaderProps> = ({ money, incomePerSec, prestigePoints }) => {
+export const StatsHeader: React.FC<StatsHeaderProps> = ({ money, incomePerSec, prestigePoints, gameDate }) => {
   return (
     <header className="h-24 bg-white border-b border-slate-200 flex items-center justify-between px-6 md:px-10 sticky top-0 z-50">
       <div className="flex space-x-6 md:space-x-12">
@@ -33,7 +34,17 @@ export const StatsHeader: React.FC<StatsHeaderProps> = ({ money, incomePerSec, p
         </div>
       </div>
       
-      {prestigePoints > 0 && (
+      <div className="flex items-center gap-8">
+        <div className="hidden lg:flex flex-col items-end border-r border-slate-100 pr-8">
+          <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1 flex items-center gap-1">
+            <Calendar className="w-3 h-3" /> Game Clock
+          </p>
+          <p className="text-sm font-black text-slate-700 tracking-tight">
+            {formatGameDate(gameDate)}
+          </p>
+        </div>
+
+        {prestigePoints > 0 && (
         <div className="hidden sm:flex flex-col items-end">
           <p className="text-[10px] uppercase font-bold text-slate-400 tracking-widest mb-1">Bonus Multiplier</p>
           <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 rounded-full border border-emerald-100">
@@ -42,6 +53,7 @@ export const StatsHeader: React.FC<StatsHeaderProps> = ({ money, incomePerSec, p
           </div>
         </div>
       )}
+      </div>
     </header>
   );
 };

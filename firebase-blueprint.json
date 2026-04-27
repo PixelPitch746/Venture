@@ -1,0 +1,37 @@
+{
+  "entities": {
+    "userSave": {
+      "title": "User Save Data",
+      "description": "Stores the player's game progress.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "gameState": { "type": "object" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "gameState", "updatedAt"]
+    },
+    "leaderboardEntry": {
+      "title": "Leaderboard Entry",
+      "description": "Public high score record.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "wealth": { "type": "number" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "displayName", "wealth", "lastUpdated"]
+    }
+  },
+  "firestore": {
+    "/saves/{userId}": {
+      "schema": "userSave",
+      "description": "Collection of user save states indexed by user UID."
+    },
+    "/leaderboard/{userId}": {
+      "schema": "leaderboardEntry",
+      "description": "Public leaderboard entries."
+    }
+  }
+}

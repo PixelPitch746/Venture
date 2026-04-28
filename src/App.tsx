@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Coins, Trophy, RefreshCcw, Landmark, MapPin, Briefcase, Building2, LayoutDashboard, Settings, TrendingUp, Zap, Globe, Mountain, Users, Flame, Star, Timer, LogIn, LogOut, Cloud, Calendar, Palmtree, Waves, Ship, Network, Cpu, Home, Building, Sun, Milestone, Sparkles, Moon, TreePine, Orbit, Framer } from 'lucide-react';
-import { GameState, RivalTrait, RivalState, HypeEvent, Property, LeaderboardEntry } from './types';
+import { CurrencyFormat, GameState, RivalTrait, RivalState, HypeEvent, Property, LeaderboardEntry, GameSettings } from './types';
 import { BUSINESSES, SAVE_KEY, CITIES, STOCKS, RIVALS, HYPE_EVENTS, MILESTONES, HOUSES } from './constants';
-import { calculateCost, calculateIncome, formatCurrency, formatGameDate } from './utils';
+import { calculateCost, calculateIncome, formatCurrency as originalFormatCurrency, formatGameDate, OperationType, handleFirestoreError } from './utils';
 import { StatsHeader } from './components/StatsHeader';
 import { BusinessCard } from './components/BusinessCard';
 import { StockCard } from './components/StockCard';
@@ -13,7 +13,15 @@ import { auth, signInWithGoogle, db } from './firebase';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, serverTimestamp, collection, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
 
+const INITIAL_SETTINGS: GameSettings = {
+  numberFormat: 'compact',
+  theme: 'cyber',
+  showCloudSyncStatus: true,
+  notificationsEnabled: true
+};
+
 const INITIAL_STATE: GameState = {
+  displayName: '',
   money: 0,
   totalEarned: 0,
   gameDate: 0, // Jan 1, 2000
@@ -43,10 +51,12 @@ const INITIAL_STATE: GameState = {
   },
   lastSaved: Date.now(),
   currentCityIndex: 0,
+  settings: INITIAL_SETTINGS
 };
 
 export default function App() {
   const [state, setState] = useState<GameState>(() => {
+    // ... same as before but uses INITIAL_STATE for settings if missing
     const saved = localStorage.getItem(SAVE_KEY);
     if (saved) {
       try {
@@ -102,6 +112,7 @@ export default function App() {
           activeEvent: parsed.activeEvent || INITIAL_STATE.activeEvent,
           eventTimeLeft: parsed.eventTimeLeft || INITIAL_STATE.eventTimeLeft,
           unlockedFeatures: mergedUnlockedFeatures,
+          settings: parsed.settings || INITIAL_STATE.settings,
         };
       } catch (e) {
         return INITIAL_STATE;
@@ -110,17 +121,57 @@ export default function App() {
     return INITIAL_STATE;
   });
 
+  const formatCurrency = (amount: number) => originalFormatCurrency(amount, (state.settings?.numberFormat as CurrencyFormat) || 'compact');
+
   const [user, setUser] = useState<User | null>(null);
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [isAuthLoading, setIsAuthLoading] = useState(false);
+  const [authInitialized, setAuthInitialized] = useState(false);
   const [prestigeTabOpen, setPrestigeTabOpen] = useState(false);
   const [welcomeOpen, setWelcomeOpen] = useState(() => !localStorage.getItem(SAVE_KEY));
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [showConfirmExpand, setShowConfirmExpand] = useState(false);
+  const [tempName, setTempName] = useState('');
   const [history, setHistory] = useState<{ time: string; val: number }[]>([]);
   const [clicks, setClicks] = useState<{ id: number; x: number; y: number; value: number }[]>([]);
-  const [activeTab, setActiveTab] = useState<'hq' | 'businesses' | 'properties' | 'market' | 'stocks' | 'leaderboard'>('hq');
+  const [activeTab, setActiveTab] = useState<'hq' | 'businesses' | 'properties' | 'market' | 'stocks' | 'leaderboard' | 'settings'>('hq');
   const [tapChallenge, setTapChallenge] = useState<{ active: boolean; needed: number; current: number; reward: number } | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([]);
   const lastTickRef = useRef(Date.now());
 
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+
+  const resetAccount = async () => {
+    try {
+      localStorage.removeItem(SAVE_KEY);
+      setState(INITIAL_STATE);
+      setWelcomeOpen(true);
+      setActiveTab('hq');
+      setResetConfirmOpen(false);
+      
+      if (user) {
+        const path = 'saves';
+        await setDoc(doc(db, path, user.uid), {
+          userId: user.uid,
+          gameState: INITIAL_STATE,
+          updatedAt: serverTimestamp()
+        });
+        
+        await updateGlobalLeaderboard(user.uid, 0, user.displayName);
+      }
+    } catch (error) {
+      if (user) {
+        handleFirestoreError(error, OperationType.WRITE, `saves/${user.uid}`, auth);
+      }
+    }
+  };
+
+  const updateSettings = (newSettings: Partial<GameSettings>) => {
+    setState(prev => ({
+      ...prev,
+      settings: { ...prev.settings!, ...newSettings }
+    }));
+  };
   const totalIncomePerSec = React.useMemo(() => {
     let income = BUSINESSES.reduce((acc, b) => {
       const owned = state.ownedBusinesses[b.id] || { level: 0, profitMultiplier: 1 };
@@ -129,10 +180,16 @@ export default function App() {
       return acc + inc;
     }, 0) * (CITIES[state.currentCityIndex]?.multiplier || 1);
 
+    const prestigeMultiplier = 1 + (state.prestigePoints * 0.02);
+
     // Add property rent
     (state.properties || []).forEach(p => {
       const house = HOUSES.find(h => h.id === p.houseId);
-      if (house) income += (house.monthlyRent / 30) * (CITIES[state.currentCityIndex]?.multiplier || 1);
+      if (house) {
+        let rent = (house.monthlyRent / 30) * (CITIES[state.currentCityIndex]?.multiplier || 1);
+        rent *= prestigeMultiplier;
+        income += rent;
+      }
     });
 
     return income;
@@ -237,10 +294,36 @@ export default function App() {
           return { ...prev, eventTimeLeft: nextTime };
         }
 
-        // Randomly trigger new event (1% chance every second)
-        if (Math.random() < 0.01) {
+        // Randomly trigger new event (2.5% chance every second - more chaotic!)
+        if (Math.random() < 0.025) {
           const randomEvent = HYPE_EVENTS[Math.floor(Math.random() * HYPE_EVENTS.length)];
-          const duration = 30 + Math.floor(Math.random() * 30); // 30-60s
+          const duration = 20 + Math.floor(Math.random() * 40); // 20-60s
+
+          // SPECIAL LOGIC FOR MARKET CRASH
+          if (randomEvent.id === 'market_crash') {
+            const nextStockPrices = { ...prev.stockPrices };
+            Object.keys(nextStockPrices).forEach(symbol => {
+              nextStockPrices[symbol] *= 0.5; // 50% drop!
+            });
+
+            return { 
+              ...prev, 
+              activeEvent: randomEvent, 
+              eventTimeLeft: duration,
+              money: prev.money * 0.5, // 50% instant cash loss!
+              stockPrices: nextStockPrices
+            };
+          }
+
+          if (randomEvent.id === 'tax_audit') {
+            return {
+              ...prev,
+              activeEvent: randomEvent,
+              eventTimeLeft: duration,
+              money: prev.money * 0.8 // 20% instant cash penalty for being too successful
+            };
+          }
+
           return { ...prev, activeEvent: randomEvent, eventTimeLeft: duration };
         }
 
@@ -301,7 +384,24 @@ export default function App() {
         const nextTotal = prev.totalEarned + earnedThisTick;
         let nextCity = prev.currentCityIndex;
 
-        const thresholds = [0, 50000, 1000000, 50000000, 1000000000, 20000000000, 100000000000, 500000000000, 2500000000000, 10000000000000, 50000000000000, 250000000000000, 1000000000000000];
+        // Harder thresholds
+        const thresholds = [
+          0, 
+          100000, 
+          5000000, 
+          250000000, 
+          10000000000, 
+          250000000000, 
+          1000000000000, 
+          10000000000000, 
+          100000000000000, 
+          500000000000000, 
+          2500000000000000, 
+          10000000000000000, 
+          50000000000000000, 
+          250000000000000000,
+          1000000000000000000
+        ];
         for (let i = thresholds.length - 1; i >= 0; i--) {
           if (nextTotal >= thresholds[i]) {
             nextCity = Math.min(i, CITIES.length - 1);
@@ -354,6 +454,7 @@ export default function App() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
+      setAuthInitialized(true);
       if (u) {
         loadStateFromFirestore(u.uid);
       }
@@ -361,33 +462,46 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
+  // Tutorial Trigger for Unauthenticated Users
+  useEffect(() => {
+    if (authInitialized && !user && !sessionStorage.getItem('seen_tutorial') && !welcomeOpen) {
+      setTutorialOpen(true);
+      sessionStorage.setItem('seen_tutorial', 'true');
+    }
+  }, [authInitialized, user, welcomeOpen]);
+
   // Real-time Global Leaderboard
   useEffect(() => {
-    const q = query(collection(db, 'leaderboard'), orderBy('wealth', 'desc'), limit(50));
+    const path = 'leaderboard';
+    const q = query(collection(db, path), orderBy('wealth', 'desc'), limit(50));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const entries = snapshot.docs.map(doc => doc.data() as LeaderboardEntry);
       setLeaderboard(entries);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, path, auth);
     });
     return () => unsubscribe();
   }, []);
 
-  const updateGlobalLeaderboard = async (uId: string, wealth: number, displayName: string | null) => {
+  const updateGlobalLeaderboard = async (uId: string, wealth: number, displayName: string) => {
+    const path = 'leaderboard';
     try {
-      await setDoc(doc(db, 'leaderboard', uId), {
+      await setDoc(doc(db, path, uId), {
         uid: uId,
         displayName: displayName || 'Anonymous Tycoon',
         wealth: wealth,
         lastUpdated: serverTimestamp()
       }, { merge: true });
     } catch (e) {
-      console.error("Error updating leaderboard:", e);
+      handleFirestoreError(e, OperationType.WRITE, `${path}/${uId}`, auth);
     }
   };
 
   const saveStateToFirestore = async (uId: string, currentState: GameState) => {
+    const path = 'saves';
     try {
       setIsCloudSyncing(true);
-      const saveRef = doc(db, 'saves', uId);
+      const saveRef = doc(db, path, uId);
       await setDoc(saveRef, {
         userId: uId,
         gameState: currentState,
@@ -395,58 +509,64 @@ export default function App() {
       });
       
       const totalWealth = currentState.money + STOCKS.reduce((acc, s) => acc + (currentState.holdings[s.symbol]?.shares || 0) * currentState.stockPrices[s.symbol], 0);
-      await updateGlobalLeaderboard(uId, totalWealth, user?.displayName || null);
+      await updateGlobalLeaderboard(uId, totalWealth, currentState.displayName);
       
       setIsCloudSyncing(false);
     } catch (error) {
-      console.error('Error saving to Firestore:', error);
       setIsCloudSyncing(false);
+      handleFirestoreError(error, OperationType.WRITE, `${path}/${uId}`, auth);
     }
   };
 
   const loadStateFromFirestore = async (uId: string) => {
+    const path = 'saves';
     try {
-      const saveRef = doc(db, 'saves', uId);
+      const saveRef = doc(db, path, uId);
       const docSnap = await getDoc(saveRef);
       if (docSnap.exists()) {
         const data = docSnap.data();
         const firestoreState = data.gameState as GameState;
         
-        // Merge with local state or overwrite? Usually overwrite if firestore is newer
-        // For simplicity, we overwrite local state with firestore data if it exists
         setState(prev => {
           const mergedBusinesses = { ...INITIAL_STATE.ownedBusinesses, ...prev.ownedBusinesses, ...(firestoreState.ownedBusinesses || {}) };
           const mergedHoldings = { ...INITIAL_STATE.holdings, ...prev.holdings, ...(firestoreState.holdings || {}) };
           const mergedStockPrices = { ...INITIAL_STATE.stockPrices, ...prev.stockPrices, ...(firestoreState.stockPrices || {}) };
           const mergedStockHistory = { ...INITIAL_STATE.stockHistory, ...prev.stockHistory, ...(firestoreState.stockHistory || {}) };
+          const mergedSettings = { ...INITIAL_SETTINGS, ...(prev.settings || {}), ...(firestoreState.settings || {}) };
           
           return {
             ...INITIAL_STATE,
             ...prev,
             ...firestoreState,
+            displayName: firestoreState.displayName || prev.displayName || 'Anonymous Tycoon',
             ownedBusinesses: mergedBusinesses,
             holdings: mergedHoldings,
             stockPrices: mergedStockPrices,
             stockHistory: mergedStockHistory,
+            settings: mergedSettings,
             properties: firestoreState.properties || [],
             unlockedFeatures: {
               ...INITIAL_STATE.unlockedFeatures,
               ...(firestoreState.unlockedFeatures || {})
             },
-            lastSaved: Date.now() // Reset tick reference
+            lastSaved: Date.now()
           };
         });
       }
     } catch (error) {
-      console.error('Error loading from Firestore:', error);
+      handleFirestoreError(error, OperationType.GET, `${path}/${uId}`, auth);
     }
   };
 
   const handleSignIn = async () => {
+    if (isAuthLoading) return;
     try {
+      setIsAuthLoading(true);
       await signInWithGoogle();
     } catch (error) {
-      console.error('Sign in failed:', error);
+      handleFirestoreError(error, OperationType.WRITE, 'auth', auth);
+    } finally {
+      setIsAuthLoading(false);
     }
   };
 
@@ -454,7 +574,7 @@ export default function App() {
     try {
       await signOut(auth);
     } catch (error) {
-      console.error('Sign out failed:', error);
+      handleFirestoreError(error, OperationType.WRITE, 'auth', auth);
     }
   };
 
@@ -480,7 +600,9 @@ export default function App() {
     const x = e ? e.clientX : window.innerWidth / 2;
     const y = e ? e.clientY : window.innerHeight / 2;
     
-    let clickValue = state.clickLevel;
+    // Apply prestige bonus to clicks (2% per point)
+    const prestigeMultiplier = 1 + (state.prestigePoints * 0.02);
+    let clickValue = state.clickLevel * prestigeMultiplier;
     if (state.activeEvent) clickValue *= state.activeEvent.multiplier;
 
     // Handle Tap Challenge
@@ -648,83 +770,100 @@ export default function App() {
     if (potentialPrestigePoints > 0) {
       setState(prev => ({
         ...INITIAL_STATE,
+        displayName: prev.displayName, // Keep identity
         money: 0,
         ownedBusinesses: INITIAL_STATE.ownedBusinesses,
         prestigePoints: prev.prestigePoints + potentialPrestigePoints,
         prestigeCount: prev.prestigeCount + 1,
         totalEarned: 0,
         unlockedFeatures: prev.unlockedFeatures,
+        settings: prev.settings,
+        holdings: {},
+        properties: [],
+        stockPrices: INITIAL_STATE.stockPrices,
+        stockHistory: INITIAL_STATE.stockHistory,
       }));
       setPrestigeTabOpen(false);
+      setShowConfirmExpand(false);
     }
   };
 
   return (
-    <div className="flex h-screen bg-slate-50 text-slate-900 font-sans overflow-hidden">
+    <div className={`flex h-screen bg-(--bg-base) text-(--text-base) font-sans overflow-hidden transition-colors duration-300 theme-${state.settings?.theme || 'cyber'}`}>
       {/* Sidebar */}
-      <aside className="w-64 bg-white border-r border-slate-200 flex flex-col hidden lg:flex">
-        <div className="p-8 border-b border-slate-100">
-          <h1 className="text-xl font-black tracking-tight text-slate-800">VENTURE.OS</h1>
-          <p className="text-[10px] text-slate-400 font-bold uppercase mt-1 tracking-widest">Empire Operations</p>
+      <aside className="w-64 bg-(--bg-card) border-r border-(--border-base) flex flex-col hidden lg:flex">
+        <div className="p-8 border-b border-(--border-base)">
+          <h1 className="text-xl font-black tracking-tight">VENTURE.OS</h1>
+          <p className="text-[10px] text-(--text-muted) font-bold uppercase mt-1 tracking-widest">Empire Operations</p>
         </div>
         
         <nav className="flex-1 p-4 space-y-1">
           <button 
             onClick={() => setActiveTab('hq')}
             className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'hq' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'
+              activeTab === 'hq' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'
             }`}
           >
-            <Landmark className={`w-4 h-4 mr-3 ${activeTab === 'hq' ? 'text-emerald-400' : 'text-slate-400'}`} />
+            <Landmark className={`w-4 h-4 mr-3 ${activeTab === 'hq' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
             <span className="font-semibold text-sm">Empire HQ</span>
           </button>
           <button 
             onClick={() => setActiveTab('businesses')}
             className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'businesses' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'
+              activeTab === 'businesses' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'
             }`}
           >
-            <Briefcase className={`w-4 h-4 mr-3 ${activeTab === 'businesses' ? 'text-emerald-400' : 'text-slate-400'}`} />
+            <Briefcase className={`w-4 h-4 mr-3 ${activeTab === 'businesses' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
             <span className="font-semibold text-sm">Active Assets</span>
           </button>
           <button 
             onClick={() => state.unlockedFeatures.stocks && setActiveTab('stocks')}
             className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'stocks' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'
+              activeTab === 'stocks' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'
             } ${!state.unlockedFeatures.stocks && 'opacity-50 cursor-not-allowed grayscale'}`}
           >
-            <Building2 className={`w-4 h-4 mr-3 ${activeTab === 'stocks' ? 'text-emerald-400' : 'text-slate-400'}`} />
-            <span className="font-semibold text-sm">Equities</span>
-            {!state.unlockedFeatures.stocks && <span className="ml-auto text-[8px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-400">$25K</span>}
+            <TrendingUp className={`w-4 h-4 mr-3 ${activeTab === 'stocks' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
+            <span className="font-semibold text-sm">Stock Market</span>
+            {!state.unlockedFeatures.stocks && <span className="ml-auto text-[8px] bg-(--bg-base) px-1.5 py-0.5 rounded text-(--text-muted)">$25K</span>}
           </button>
           <button 
             onClick={() => state.unlockedFeatures.market && setActiveTab('market')}
             className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'market' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'
+              activeTab === 'market' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'
             } ${!state.unlockedFeatures.market && 'opacity-50 cursor-not-allowed grayscale'}`}
           >
-            <MapPin className={`w-4 h-4 mr-3 ${activeTab === 'market' ? 'text-emerald-400' : 'text-slate-400'}`} />
+            <MapPin className={`w-4 h-4 mr-3 ${activeTab === 'market' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
             <span className="font-semibold text-sm">Geo Markets</span>
-            {!state.unlockedFeatures.market && <span className="ml-auto text-[8px] bg-slate-100 px-1.5 py-0.5 rounded text-slate-400">$10K</span>}
+            {!state.unlockedFeatures.market && <span className="ml-auto text-[8px] bg-(--bg-base) px-1.5 py-0.5 rounded text-(--text-muted)">$10K</span>}
           </button>
           <button 
             onClick={() => setActiveTab('leaderboard')}
             className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${
-              activeTab === 'leaderboard' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'
+              activeTab === 'leaderboard' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'
             }`}
           >
-            <Users className={`w-4 h-4 mr-3 ${activeTab === 'leaderboard' ? 'text-emerald-400' : 'text-slate-400'}`} />
+            <Users className={`w-4 h-4 mr-3 ${activeTab === 'leaderboard' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
             <span className="font-semibold text-sm">Leaderboard</span>
           </button>
+
+          <button 
+            onClick={() => setActiveTab('settings')}
+            className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${
+              activeTab === 'settings' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'
+            }`}
+          >
+            <Settings className={`w-4 h-4 mr-3 ${activeTab === 'settings' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
+            <span className="font-semibold text-sm">Settings</span>
+          </button>
           
-          <div className="my-4 h-[1px] bg-slate-100 mx-4" />
+          <div className="my-4 h-[1px] bg-(--border-base) mx-4" />
 
           <button 
             onClick={() => setActiveTab('properties')}
-            className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${activeTab === 'properties' ? 'bg-slate-900 text-white' : 'text-slate-500 hover:bg-slate-100'} text-sm font-medium`}
+            className={`w-full flex items-center px-4 py-3 rounded-lg transition-all ${activeTab === 'properties' ? 'bg-slate-900 text-white' : 'text-(--text-muted) hover:bg-(--bg-base)'} text-sm font-medium`}
           >
-            <Building2 className="w-4 h-4 mr-3 text-slate-400" />
-            Real Estate
+            <Home className={`w-4 h-4 mr-3 ${activeTab === 'properties' ? 'text-emerald-400' : 'text-(--text-muted)'}`} />
+            <span className="font-semibold text-sm">Houses & Estates</span>
           </button>
 
         </nav>
@@ -733,13 +872,15 @@ export default function App() {
           {user ? (
             <div className="space-y-3">
               <div className="flex items-center gap-3 px-2">
-                <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-200" />
+                <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-(--border-base)" />
                 <div className="min-w-0">
-                  <p className="text-[10px] font-black text-slate-900 truncate uppercase tracking-tight">{user.displayName || 'Capitalist'}</p>
-                  <p className="text-[8px] font-bold text-slate-400 flex items-center gap-1">
-                    <Cloud className={`w-2 h-2 ${isCloudSyncing ? 'text-emerald-400 animate-pulse' : 'text-slate-300'}`} />
-                    {isCloudSyncing ? 'SYNCING...' : 'SECURE'}
-                  </p>
+                  <p className="text-[10px] font-black truncate uppercase tracking-tight">{state.displayName || 'Capitalist'}</p>
+                  {(state.settings?.showCloudSyncStatus ?? true) && (
+                    <p className="text-[8px] font-bold text-(--text-muted) flex items-center gap-1">
+                      <Cloud className={`w-2 h-2 ${isCloudSyncing ? 'text-emerald-400 animate-pulse' : 'text-slate-300'}`} />
+                      {isCloudSyncing ? 'SYNCING...' : 'SECURE'}
+                    </p>
+                  )}
                 </div>
               </div>
               <button 
@@ -755,9 +896,15 @@ export default function App() {
               <p className="text-[8px] font-bold text-amber-500 mb-3 uppercase tracking-tighter">Progress will NOT be saved</p>
               <button 
                 onClick={handleSignIn}
-                className="w-full py-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-slate-800 transition-all"
+                disabled={isAuthLoading}
+                className="w-full py-3 bg-slate-900 text-white rounded-xl font-black text-[10px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-slate-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                <LogIn className="w-3 h-3" /> Login to Save
+                {isAuthLoading ? (
+                  <RefreshCcw className="w-3 h-3 animate-spin" />
+                ) : (
+                  <LogIn className="w-3 h-3" />
+                )}
+                {isAuthLoading ? 'Authorizing...' : 'Login to Save'}
               </button>
             </div>
           )}
@@ -776,6 +923,17 @@ export default function App() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col overflow-hidden relative">
+        <StatsHeader 
+          displayName={state.displayName}
+          money={state.money + 
+            STOCKS.reduce((acc, s) => acc + (state.holdings[s.symbol]?.shares || 0) * state.stockPrices[s.symbol], 0) +
+            (state.properties || []).reduce((acc, p) => acc + p.purchasePrice, 0) +
+            BUSINESSES.reduce((acc, b) => acc + (state.ownedBusinesses[b.id]?.level || 0) * b.baseCost, 0)
+          } 
+          incomePerSec={totalIncomePerSec} 
+          prestigePoints={state.prestigePoints}
+          gameDate={state.gameDate}
+        />
         {clicks.map(click => (
           <FloatingText 
             key={click.id} 
@@ -790,7 +948,7 @@ export default function App() {
           <div className="max-w-5xl mx-auto">
             {/* Hype Event Banner */}
             <AnimatePresence>
-              {state.activeEvent && (
+              {(state.activeEvent && (state.settings?.notificationsEnabled ?? true)) && (
                 <motion.div
                   initial={{ height: 0, opacity: 0, marginBottom: 0 }}
                   animate={{ height: 'auto', opacity: 1, marginBottom: 24 }}
@@ -807,6 +965,24 @@ export default function App() {
                         <h3 className="text-2xl font-black tracking-tight">{state.activeEvent.name}</h3>
                       </div>
                       <p className="font-bold opacity-90">{state.activeEvent.description}</p>
+                      {state.activeEvent.id === 'market_crash' && (
+                        <div className="mt-4 inline-flex items-center gap-2 bg-black/20 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest border border-white/10">
+                          <TrendingUp className="w-3 h-3 rotate-180 text-rose-300" />
+                          Assets Liquidated: -50% Cash, -50% Stocks
+                        </div>
+                      )}
+                      {state.activeEvent.id === 'tax_audit' && (
+                        <div className="mt-4 inline-flex items-center gap-2 bg-black/20 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest border border-white/10">
+                          <Briefcase className="w-3 h-3 text-slate-300" />
+                          IRS Penalty Paid: -20% Liquid Cash
+                        </div>
+                      )}
+                      {state.activeEvent.id === 'hyper_growth' && (
+                        <div className="mt-4 inline-flex items-center gap-2 bg-white/20 px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest border border-white/10">
+                          <Zap className="w-3 h-3 text-cyan-300" />
+                          Singularity Active: Multipliers Overdriven
+                        </div>
+                      )}
                     </div>
                     <div className="flex items-center gap-6">
                       <div className="bg-white/20 backdrop-blur-md px-6 py-3 rounded-2xl border border-white/30 text-center min-w-[120px]">
@@ -857,11 +1033,11 @@ export default function App() {
             </AnimatePresence>
             {/* Robinhood-Style Global Header & Graph */}
             <section className="mb-10">
-              <div className="bg-white border border-slate-200 rounded-[2.5rem] p-8 md:p-12 shadow-sm">
+              <div className="bg-(--bg-card) border border-(--border-base) rounded-[2.5rem] p-8 md:p-12 shadow-sm">
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-10">
                   <div>
-                    <p className="text-[10px] uppercase font-black text-slate-400 tracking-[0.2em] mb-3">Portfolio Value</p>
-                    <h2 className="text-5xl md:text-7xl font-black text-slate-900 tracking-tight leading-none">
+                    <p className="text-[10px] uppercase font-black text-(--text-muted) tracking-[0.2em] mb-3">Portfolio Value</p>
+                    <h2 className="text-5xl md:text-7xl font-black tracking-tight leading-none">
                       {formatCurrency(state.money + STOCKS.reduce((acc, s) => acc + (state.holdings[s.symbol]?.shares || 0) * state.stockPrices[s.symbol], 0))}
                     </h2>
                     <div className="flex items-center gap-4 mt-5">
@@ -875,8 +1051,8 @@ export default function App() {
                           }, 0))}
                         </span>
                       </div>
-                      <div className="h-4 w-[1px] bg-slate-200 mx-1"></div>
-                      <div className="flex items-center gap-1.5 text-slate-400">
+                      <div className="h-4 w-[1px] bg-(--border-base) mx-1"></div>
+                      <div className="flex items-center gap-1.5 text-(--text-muted)">
                         <Coins className="w-3.5 h-3.5" />
                         <span className="text-xs font-bold">+{formatCurrency(totalIncomePerSec)}/s</span>
                       </div>
@@ -884,17 +1060,17 @@ export default function App() {
                   </div>
                   <div className="flex flex-col items-end gap-4">
                     <div className="flex flex-col items-end gap-1">
-                      <p className="text-[10px] uppercase font-black text-slate-400 tracking-widest leading-none">DATE FLUX</p>
+                      <p className="text-[10px] uppercase font-black text-(--text-muted) tracking-widest leading-none">DATE FLUX</p>
                       <div className="flex items-center gap-2">
                         <Calendar className="w-4 h-4 text-indigo-500" />
-                        <span className="text-xl font-black text-slate-700">{formatGameDate(state.gameDate)}</span>
+                        <span className="text-xl font-black text-(--text-base) opacity-80">{formatGameDate(state.gameDate)}</span>
                       </div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
-                      <p className="text-[10px] uppercase font-black text-slate-400 tracking-widest leading-none">REPUTATION</p>
+                      <p className="text-[10px] uppercase font-black text-(--text-muted) tracking-widest leading-none">REPUTATION</p>
                       <div className="flex items-center gap-2">
                         <Trophy className="w-4 h-4 text-amber-500" />
-                        <span className="text-xl font-black text-slate-700">{state.prestigePoints}</span>
+                        <span className="text-xl font-black text-(--text-base) opacity-80">{state.prestigePoints}</span>
                       </div>
                     </div>
                   </div>
@@ -932,28 +1108,28 @@ export default function App() {
             {activeTab === 'hq' && (
               <section className="flex flex-col items-center justify-center py-12 md:py-20 space-y-12">
                 <div className="text-center space-y-4">
-                  <h2 className="text-3xl font-black text-slate-900 uppercase tracking-[0.3em]">Empire Operations</h2>
-                  <p className="text-slate-400 font-bold text-sm">MANUAL CAPITAL GENERATION PROTOCOL ACTIVE</p>
+                  <h2 className="text-3xl font-black uppercase tracking-[0.3em]">Empire Operations</h2>
+                  <p className="text-(--text-muted) font-bold text-sm">MANUAL CAPITAL GENERATION PROTOCOL ACTIVE</p>
                 </div>
 
                 {/* Milestone Progress Tracker */}
                 {MILESTONES.find(m => m.featureId && !state.unlockedFeatures[m.featureId]) && (
-                  <div className="w-full max-w-lg bg-white border border-slate-200 rounded-[2rem] p-8 shadow-sm">
+                  <div className="w-full max-w-lg bg-(--bg-card) border border-(--border-base) rounded-[2rem] p-8 shadow-sm">
                     <div className="flex justify-between items-end mb-6">
                       <div>
                         <p className="text-[10px] font-black text-emerald-500 uppercase tracking-widest mb-1">Active Objective</p>
-                        <h3 className="text-xl font-black text-slate-900 uppercase">
+                        <h3 className="text-xl font-black uppercase">
                           {MILESTONES.find(m => m.featureId && !state.unlockedFeatures[m.featureId])?.label}
                         </h3>
                       </div>
                       <div className="text-right">
-                        <p className="text-sm font-black text-slate-900">
+                        <p className="text-sm font-black">
                           {Math.floor(Math.min(100, (state.money / (MILESTONES.find(m => m.featureId && !state.unlockedFeatures[m.featureId])?.target || 1)) * 100))}%
                         </p>
                       </div>
                     </div>
                     
-                    <div className="h-3 w-full bg-slate-50 border border-slate-100 rounded-full overflow-hidden mb-4">
+                    <div className="h-3 w-full bg-(--bg-base) border border-(--border-base) rounded-full overflow-hidden mb-4">
                       <motion.div 
                         className="h-full bg-emerald-400"
                         initial={{ width: 0 }}
@@ -963,18 +1139,18 @@ export default function App() {
                       />
                     </div>
                     
-                    <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                    <div className="flex justify-between items-center text-[10px] font-bold uppercase tracking-widest text-(--text-muted)">
                       <span>{formatCurrency(state.money)}</span>
                       <span>{formatCurrency(MILESTONES.find(m => m.featureId && !state.unlockedFeatures[m.featureId])?.target || 0)}</span>
                     </div>
                     
-                    <div className="mt-8 pt-6 border-t border-slate-50 flex items-center gap-4">
+                    <div className="mt-8 pt-6 border-t border-(--bg-base) flex items-center gap-4">
                       <div className="w-10 h-10 bg-amber-50 rounded-xl flex items-center justify-center">
                         <Zap className="w-5 h-5 text-amber-500" />
                       </div>
                       <div>
-                        <p className="text-[10px] font-black text-slate-900 uppercase">Reward Upon Completion</p>
-                        <p className="text-xs font-bold text-slate-400 italic">
+                        <p className="text-[10px] font-black uppercase">Reward Upon Completion</p>
+                        <p className="text-xs font-bold text-(--text-muted) italic">
                           {MILESTONES.find(m => m.featureId && !state.unlockedFeatures[m.featureId])?.rewardText}
                         </p>
                       </div>
@@ -987,11 +1163,11 @@ export default function App() {
                     whileHover={{ scale: 1.02 }}
                     whileTap={{ scale: 0.95 }}
                     onClick={(e) => handleManualClick(e)}
-                    className="w-64 h-64 md:w-80 md:h-80 bg-white border-8 border-slate-900 rounded-[3rem] shadow-[0_30px_50px_-15px_rgba(0,0,0,0.2)] flex items-center justify-center cursor-pointer relative z-10 overflow-hidden"
+                    className="w-64 h-64 md:w-80 md:h-80 bg-(--bg-card) border-8 border-slate-900 rounded-[3rem] shadow-[0_30px_50px_-15px_rgba(0,0,0,0.2)] flex items-center justify-center cursor-pointer relative z-10 overflow-hidden"
                   >
-                    <div className="absolute inset-0 bg-slate-50 opacity-0 group-hover:opacity-100 transition-opacity" />
-                    <Coins className="w-32 h-32 md:w-40 md:h-40 text-slate-900 relative z-10 group-hover:rotate-12 transition-transform" />
-                    <div className="absolute bottom-10 text-[10px] font-black text-slate-400 tracking-[0.2em] group-hover:text-slate-900 transition-colors uppercase">
+                    <div className="absolute inset-0 bg-(--bg-base) opacity-0 group-hover:opacity-100 transition-opacity" />
+                    <Coins className="w-32 h-32 md:w-40 md:h-40 text-(--text-base) relative z-10 group-hover:rotate-12 transition-transform" />
+                    <div className="absolute bottom-10 text-[10px] font-black text-(--text-muted) tracking-[0.2em] group-hover:text-(--text-base) transition-colors uppercase">
                       Click to Bootstrap
                     </div>
                   </motion.div>
@@ -1002,19 +1178,19 @@ export default function App() {
                     <div className="md:col-span-2 flex justify-center">
                       <button 
                         onClick={() => saveStateToFirestore(user.uid, state)}
-                        className="flex items-center gap-2 px-6 py-3 bg-white border border-slate-200 rounded-full text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-slate-900 hover:border-slate-400 transition-all group"
+                        className="flex items-center gap-2 px-6 py-3 bg-(--bg-card) border border-(--border-base) rounded-full text-[10px] font-black text-(--text-muted) uppercase tracking-widest hover:text-(--text-base) hover:border-(--text-muted) transition-all group"
                       >
                         <Cloud className={`w-3 h-3 ${isCloudSyncing ? 'animate-pulse text-emerald-400' : 'group-hover:text-emerald-400'}`} />
                         Sync Progress Now
                       </button>
                     </div>
                   )}
-                  <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm text-center relative overflow-hidden group">
+                  <div className="bg-(--bg-card) p-8 rounded-3xl border border-(--border-base) shadow-sm text-center relative overflow-hidden group">
                     <div className="absolute top-0 right-0 p-3">
                       <Zap className="w-4 h-4 text-amber-500 opacity-20 group-hover:opacity-100 transition-opacity" />
                     </div>
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Click Value</p>
-                    <p className="text-3xl font-black text-slate-900 mb-6">{formatCurrency(state.clickLevel)}</p>
+                    <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-1">Click Value</p>
+                    <p className="text-3xl font-black mb-6">{formatCurrency(state.clickLevel)}</p>
                     
                     <button
                       onClick={handleUpgradeClick}
@@ -1022,19 +1198,19 @@ export default function App() {
                       className={`w-full py-4 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${
                         state.money >= 50 * Math.pow(state.clickLevel, 1.5)
                           ? 'bg-slate-900 text-white hover:bg-slate-800'
-                          : 'bg-slate-100 text-slate-400 cursor-not-allowed'
+                          : 'bg-(--bg-base) text-(--text-muted) cursor-not-allowed'
                       }`}
                     >
                       Maximize Output • {formatCurrency(50 * Math.pow(state.clickLevel, 1.5))}
                     </button>
                   </div>
 
-                  <div className="bg-white p-8 rounded-3xl border border-slate-200 shadow-sm text-center flex flex-col justify-center">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Click Level</p>
-                    <p className="text-3xl font-black text-slate-900">{state.clickLevel}</p>
+                  <div className="bg-(--bg-card) p-8 rounded-3xl border border-(--border-base) shadow-sm text-center flex flex-col justify-center">
+                    <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-1">Click Level</p>
+                    <p className="text-3xl font-black">{state.clickLevel}</p>
                     <div className="mt-4 flex items-center justify-center gap-1">
                       {[...Array(5)].map((_, i) => (
-                        <div key={i} className={`h-1.5 w-6 rounded-full ${i < (state.clickLevel % 5 || 5) ? 'bg-emerald-400' : 'bg-slate-100'}`} />
+                        <div key={i} className={`h-1.5 w-6 rounded-full ${i < (state.clickLevel % 5 || 5) ? 'bg-emerald-400' : 'bg-(--bg-base)'}`} />
                       ))}
                     </div>
                   </div>
@@ -1044,11 +1220,11 @@ export default function App() {
 
             {activeTab === 'market' && (
               <div className="space-y-6">
-                <section className="bg-white border border-slate-200 p-8 rounded-[2rem] shadow-sm">
+                <section className="bg-(--bg-card) border border-(--border-base) p-8 rounded-[2rem] shadow-sm">
                   <div className="flex justify-between items-center mb-8">
                     <div>
-                      <h2 className="text-xl font-black text-slate-900 tracking-tight">Market Volatility</h2>
-                      <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Empire Performance Index</p>
+                      <h2 className="text-xl font-black tracking-tight">Market Volatility</h2>
+                      <p className="text-[10px] text-(--text-muted) font-bold uppercase tracking-widest mt-1">Empire Performance Index</p>
                     </div>
                     <div className="px-3 py-1 bg-emerald-50 text-emerald-600 text-[10px] font-black rounded-full border border-emerald-100 uppercase tracking-wider">Growth Stable</div>
                   </div>
@@ -1062,8 +1238,8 @@ export default function App() {
                           </linearGradient>
                         </defs>
                         <Tooltip 
-                          contentStyle={{ backgroundColor: '#fff', border: 'none', borderRadius: '12px', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
-                          itemStyle={{ color: '#000', fontWeight: '800' }}
+                          contentStyle={{ backgroundColor: 'var(--bg-card)', border: 'none', borderRadius: '12px', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                          itemStyle={{ color: 'var(--text-base)', fontWeight: '800' }}
                         />
                         <Area type="monotone" dataKey="val" stroke="#10b981" strokeWidth={3} fillOpacity={1} fill="url(#colorHistory)" />
                       </AreaChart>
@@ -1072,19 +1248,19 @@ export default function App() {
                 </section>
 
                 <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                  <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Market Cap</p>
-                    <p className="tracking-tight font-black text-xl text-slate-800 leading-none">{formatCurrency(totalMarketCap)}</p>
+                  <div className="bg-(--bg-card) border border-(--border-base) p-6 rounded-2xl shadow-sm">
+                    <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-1">Total Market Cap</p>
+                    <p className="tracking-tight font-black text-xl leading-none">{formatCurrency(totalMarketCap)}</p>
                     <p className="text-xs font-bold text-emerald-500 mt-2">Active Circulation</p>
                   </div>
-                  <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Stock Volatility</p>
-                    <p className="tracking-tight font-black text-xl text-slate-800 leading-none">High</p>
+                  <div className="bg-(--bg-card) border border-(--border-base) p-6 rounded-2xl shadow-sm">
+                    <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-1">Stock Volatility</p>
+                    <p className="tracking-tight font-black text-xl leading-none">High</p>
                     <p className="text-xs font-bold text-rose-500 mt-2">Risk Alert Active</p>
                   </div>
-                  <div className="bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
-                    <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Market Sentiment</p>
-                    <p className="tracking-tight font-black text-xl text-slate-800 leading-none">{marketSentiment}</p>
+                  <div className="bg-(--bg-card) border border-(--border-base) p-6 rounded-2xl shadow-sm">
+                    <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-1">Market Sentiment</p>
+                    <p className="tracking-tight font-black text-xl leading-none">{marketSentiment}</p>
                     <p className={`text-xs font-bold mt-2 ${marketSentiment === 'Bull' ? 'text-emerald-500' : 'text-rose-500'}`}>
                       {marketSentiment === 'Bull' ? 'Expansion Phase' : 'Correction Phase'}
                     </p>
@@ -1165,8 +1341,8 @@ export default function App() {
             {activeTab === 'stocks' && (
               <section className="space-y-6">
                 <div className="flex items-center justify-between px-2 mb-6">
-                  <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em]">Live Assets</h3>
-                  <div className="h-[1px] flex-1 bg-slate-100 mx-6"></div>
+                  <h3 className="text-xs font-black text-(--text-muted) uppercase tracking-[0.2em]">Live Assets</h3>
+                  <div className="h-[1px] flex-1 bg-(--border-base) mx-6"></div>
                 </div>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -1190,25 +1366,25 @@ export default function App() {
               <section className="space-y-8 pb-24">
                 <div className="flex items-center justify-between px-2">
                   <div>
-                    <h3 className="text-xs font-black text-slate-400 uppercase tracking-[0.2em] mb-1">Real Estate Portfolio</h3>
-                    <p className="text-sm text-slate-600 font-medium">Invest in properties and collect monthly rent.</p>
+                    <h3 className="text-xs font-black text-(--text-muted) uppercase tracking-[0.2em] mb-1">Residential Portfolio</h3>
+                    <p className="text-sm opacity-80 font-medium">Invest in luxury housing and collect monthly rent.</p>
                   </div>
-                  <div className="h-[1px] flex-1 bg-slate-100 mx-6"></div>
-                  <div className="flex items-center gap-2 px-4 py-2 bg-slate-100 rounded-xl">
-                    <Timer className="w-4 h-4 text-slate-400" />
-                    <span className="text-[10px] font-black uppercase text-slate-500">1 day / sec</span>
+                  <div className="h-[1px] flex-1 bg-(--border-base) mx-6"></div>
+                  <div className="flex items-center gap-2 px-4 py-2 bg-(--bg-base) rounded-xl">
+                    <Timer className="w-4 h-4 text-(--text-muted)" />
+                    <span className="text-[10px] font-black uppercase text-(--text-muted)">1 day / sec</span>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
                   <div className="space-y-6">
-                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Available Market</h4>
+                    <h4 className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest px-2">Available Market</h4>
                     {HOUSES.map(house => {
                       const currentPrice = house.basePrice * Math.pow(1 + house.appreciationRate, Math.floor(state.gameDate / 30));
                       const canAfford = state.money >= currentPrice;
                       
                       return (
-                        <div key={house.id} className="bg-white border border-slate-200 rounded-[2.5rem] p-6 shadow-sm hover:shadow-md transition-all">
+                        <div key={house.id} className="bg-(--bg-card) border border-(--border-base) rounded-[2.5rem] p-6 shadow-sm hover:shadow-md transition-all">
                           <div className="flex justify-between items-start mb-6">
                             <div className={`w-14 h-14 rounded-2xl flex items-center justify-center ${house.color.replace('text-', 'bg-')}/10`}>
                               {house.icon === 'Home' && <Home className={`w-7 h-7 ${house.color}`} />}
@@ -1223,17 +1399,18 @@ export default function App() {
                               {house.icon === 'TreePine' && <TreePine className={`w-7 h-7 ${house.color}`} />}
                               {house.icon === 'Orbit' && <Orbit className={`w-7 h-7 ${house.color}`} />}
                               {house.icon === 'Framer' && <Framer className={`w-7 h-7 ${house.color}`} />}
+                              {house.icon === 'Star' && <Star className={`w-7 h-7 ${house.color}`} />}
                             </div>
                             <div className="text-right">
-                              <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Market Value</p>
-                              <p className="text-xl font-black text-slate-900">{formatCurrency(currentPrice)}</p>
+                              <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest">Market Value</p>
+                              <p className="text-xl font-black">{formatCurrency(currentPrice)}</p>
                             </div>
                           </div>
                           
                           <div className="mb-6">
-                            <h5 className="font-black text-slate-900 text-lg uppercase tracking-tight">{house.name}</h5>
-                            <p className="text-xs text-slate-400 font-medium mt-1 uppercase tracking-widest">Estimated Rent: {formatCurrency(house.monthlyRent)} / mo</p>
-                            <p className="text-slate-500 text-sm mt-3 leading-relaxed">{house.description}</p>
+                            <h5 className="font-black text-lg uppercase tracking-tight">{house.name}</h5>
+                            <p className="text-xs text-(--text-muted) font-medium mt-1 uppercase tracking-widest">Estimated Rent: {formatCurrency(house.monthlyRent)} / mo</p>
+                            <p className="text-(--text-base) opacity-80 text-sm mt-3 leading-relaxed">{house.description}</p>
                           </div>
 
                           <button
@@ -1242,7 +1419,7 @@ export default function App() {
                             className={`w-full py-4 rounded-2xl font-black text-xs uppercase tracking-widest transition-all ${
                               canAfford 
                                 ? 'bg-slate-900 text-white hover:bg-slate-800 shadow-lg shadow-slate-900/10 active:scale-95' 
-                                : 'bg-slate-100 text-slate-400 cursor-not-allowed grayscale'
+                                : 'bg-(--bg-base) text-(--text-muted) cursor-not-allowed grayscale'
                             }`}
                           >
                             Acquire Asset
@@ -1253,11 +1430,11 @@ export default function App() {
                   </div>
 
                   <div className="space-y-6">
-                    <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest px-2">Owned Properties ({(state.properties || []).length})</h4>
+                    <h4 className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest px-2">Owned Properties ({(state.properties || []).length})</h4>
                     {(state.properties || []).length === 0 ? (
-                      <div className="bg-slate-50 border-2 border-dashed border-slate-200 rounded-[2.5rem] p-12 text-center">
-                        <Building2 className="w-12 h-12 text-slate-300 mx-auto mb-4" />
-                        <p className="text-slate-400 text-sm font-medium uppercase tracking-widest">Portfolio Empty</p>
+                      <div className="bg-(--bg-base) border-2 border-dashed border-(--border-base) rounded-[2.5rem] p-12 text-center">
+                        <Building2 className="w-12 h-12 text-(--text-muted) opacity-50 mx-auto mb-4" />
+                        <p className="text-(--text-muted) text-sm font-medium uppercase tracking-widest">Portfolio Empty</p>
                       </div>
                     ) : (
                       <div className="space-y-4">
@@ -1268,9 +1445,10 @@ export default function App() {
                           const profit = currentVal - prop.purchasePrice;
 
                           return (
-                            <div key={prop.id} className="bg-white border border-slate-200 rounded-3xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-6">
+                            <div key={prop.id} className="bg-(--bg-card) border border-(--border-base) rounded-3xl p-6 flex flex-col md:flex-row md:items-center justify-between gap-6">
                               <div className="flex items-center gap-4">
                                 <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${house.color.replace('text-', 'bg-')}/10`}>
+                                  {/* ... icons ... */}
                                   {house.icon === 'Home' && <Home className={`w-6 h-6 ${house.color}`} />}
                                   {house.icon === 'Building' && <Building className={`w-6 h-6 ${house.color}`} />}
                                   {house.icon === 'Castle' && <Landmark className={`w-6 h-6 ${house.color}`} />}
@@ -1283,16 +1461,17 @@ export default function App() {
                                   {house.icon === 'TreePine' && <TreePine className={`w-6 h-6 ${house.color}`} />}
                                   {house.icon === 'Orbit' && <Orbit className={`w-6 h-6 ${house.color}`} />}
                                   {house.icon === 'Framer' && <Framer className={`w-6 h-6 ${house.color}`} />}
+                                  {house.icon === 'Star' && <Star className={`w-6 h-6 ${house.color}`} />}
                                 </div>
                                 <div>
-                                  <h6 className="font-black text-slate-800 uppercase tracking-tight">{house.name}</h6>
-                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Pur. {formatGameDate(prop.purchaseDate)}</p>
+                                  <h6 className="font-black uppercase tracking-tight">{house.name}</h6>
+                                  <p className="text-[10px] font-bold text-(--text-muted) uppercase tracking-widest">Pur. {formatGameDate(prop.purchaseDate)}</p>
                                 </div>
                               </div>
 
                               <div className="flex items-center gap-8 md:gap-12">
                                 <div>
-                                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Equity Change</p>
+                                  <p className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-1">Equity Change</p>
                                   <p className={`text-sm font-bold ${profit >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
                                     {profit >= 0 ? '+' : ''}{formatCurrency(profit)}
                                   </p>
@@ -1316,40 +1495,40 @@ export default function App() {
 
             {activeTab === 'leaderboard' && (
               <section className="space-y-6">
-                <div className="bg-white border border-slate-200 rounded-[2.5rem] p-8 md:p-10 shadow-sm">
+                <div className="bg-(--bg-card) border border-(--border-base) rounded-[2.5rem] p-8 md:p-10 shadow-sm">
                   <div className="mb-8">
-                    <h2 className="text-2xl font-black text-slate-900 tracking-tight">Market Dominance</h2>
-                    <p className="text-xs text-slate-400 mt-1 uppercase font-bold tracking-widest">Global Corporate Leaderboard</p>
+                    <h2 className="text-2xl font-black tracking-tight">Market Dominance</h2>
+                    <p className="text-xs text-(--text-muted) mt-1 uppercase font-bold tracking-widest">Global Corporate Leaderboard</p>
                   </div>
                   
                     <div className="space-y-4">
                       {leaderboard.length === 0 ? (
                         <div className="py-12 text-center">
-                          <Globe className="w-12 h-12 text-slate-200 mx-auto mb-4 animate-pulse" />
-                          <p className="text-slate-400 font-medium uppercase tracking-widest text-xs">Connecting to Global Network...</p>
+                          <Globe className="w-12 h-12 text-(--border-base) mx-auto mb-4 animate-pulse" />
+                          <p className="text-(--text-muted) font-medium uppercase tracking-widest text-xs">Connecting to Global Network...</p>
                         </div>
                       ) : (
                         leaderboard.map((entry, idx) => {
                           const isPlayer = entry.uid === user?.uid;
                           return (
-                            <div key={entry.uid} className={`flex items-center justify-between p-5 rounded-2xl border transition-all ${isPlayer ? 'bg-slate-900 border-slate-900 text-white shadow-lg ring-4 ring-indigo-500/20' : 'bg-white border-slate-100 md:hover:border-slate-300'}`}>
+                            <div key={entry.uid} className={`flex items-center justify-between p-5 rounded-2xl border transition-all ${isPlayer ? 'bg-slate-900 border-slate-900 text-white shadow-lg ring-4 ring-indigo-500/20' : 'bg-(--bg-card) border-(--bg-base) md:hover:border-(--border-base)'}`}>
                               <div className="flex items-center gap-4">
                                 <div className={`text-lg font-black w-8 ${idx === 0 ? 'text-amber-500' : idx === 1 ? 'text-slate-400' : idx === 2 ? 'text-amber-700' : 'text-slate-300'}`}>#{idx + 1}</div>
-                                <div className={`p-3 rounded-xl ${isPlayer ? 'bg-indigo-500' : 'bg-slate-50'}`}>
+                                <div className={`p-3 rounded-xl ${isPlayer ? 'bg-indigo-500' : 'bg-(--bg-base)'}`}>
                                   {idx === 0 ? <Trophy className={`w-5 h-5 ${isPlayer ? 'text-white' : 'text-amber-500'}`} /> : 
                                    isPlayer ? <Landmark className="w-5 h-5 text-white" /> :
                                    <Globe className="w-5 h-5 text-slate-400" />}
                                 </div>
                                 <div>
-                                  <h4 className={`font-black text-sm uppercase tracking-tight ${isPlayer ? 'text-white' : 'text-slate-900'}`}>{entry.displayName}</h4>
-                                  <p className={`text-[10px] font-bold ${isPlayer ? 'text-indigo-300' : 'text-slate-400'}`}>
+                                  <h4 className={`font-black text-sm uppercase tracking-tight ${isPlayer ? 'text-white' : ''}`}>{entry.displayName}</h4>
+                                  <p className={`text-[10px] font-bold ${isPlayer ? 'text-indigo-300' : 'text-(--text-muted)'}`}>
                                     {isPlayer ? 'YOUR CORPORATE EMPIRE' : 'GLOBAL COMPETITOR'}
                                   </p>
                                 </div>
                               </div>
                               <div className="text-right">
-                                <p className={`font-black text-lg ${isPlayer ? 'text-emerald-400' : 'text-slate-900'}`}>{formatCurrency(entry.wealth)}</p>
-                                <p className="text-[10px] font-bold text-slate-400 uppercase">Net Worth</p>
+                                <p className={`font-black text-lg ${isPlayer ? 'text-emerald-400' : ''}`}>{formatCurrency(entry.wealth)}</p>
+                                <p className="text-[10px] font-bold text-(--text-muted) uppercase">Net Worth</p>
                               </div>
                             </div>
                           );
@@ -1383,15 +1562,163 @@ export default function App() {
             )}
 
             {/* Region Info */}
-            {activeTab !== 'stocks' && (
-              <div className="mb-8 flex items-center justify-between bg-white border border-slate-200 p-6 rounded-2xl shadow-sm">
+            {activeTab === 'settings' && (
+              <section className="space-y-6">
+                <div className="bg-(--bg-card) border border-(--border-base) rounded-[2.5rem] p-8 md:p-10 shadow-sm">
+                  <div className="mb-10">
+                    <h2 className="text-2xl font-black tracking-tight">System Configuration</h2>
+                    <p className="text-xs text-(--text-muted) mt-1 uppercase font-bold tracking-widest">Personalize your enterprise interface</p>
+                  </div>
+
+                  <div className="mb-10 p-6 bg-slate-900 border border-slate-800 rounded-3xl text-white">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+                      <div className="flex items-center gap-4">
+                        <div className="w-16 h-16 bg-white/10 rounded-2xl flex items-center justify-center">
+                          <Users className="w-8 h-8 text-emerald-400" />
+                        </div>
+                        <div>
+                          <p className="text-[10px] font-black text-emerald-400 uppercase tracking-widest">Authorized Identity</p>
+                          <h3 className="text-xl font-black uppercase tracking-tight">{state.displayName || 'Unnamed Executive'}</h3>
+                        </div>
+                      </div>
+                      <div className="flex-1 max-w-sm">
+                        <div className="relative group">
+                          <input 
+                            type="text"
+                            placeholder="Redefine Identity..."
+                            defaultValue={state.displayName}
+                            onBlur={(e) => {
+                              const newName = e.target.value.trim();
+                              if (newName && newName !== state.displayName) {
+                                setState(prev => ({ ...prev, displayName: newName.slice(0, 20) }));
+                              }
+                            }}
+                            className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm font-bold focus:outline-none focus:ring-2 focus:ring-emerald-500/50 focus:border-emerald-500 transition-all uppercase tracking-tight"
+                          />
+                          <p className="text-[8px] font-black text-white/30 uppercase tracking-[0.2em] mt-2 ml-1">Blur field to apply changes</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+                    <div className="space-y-8">
+                      <div>
+                        <h4 className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-4">Interface Aesthetics</h4>
+                        <div className="grid grid-cols-3 gap-3">
+                          {(['cyber', 'minimal', 'dark'] as const).map(t => (
+                            <button
+                              key={t}
+                              onClick={() => updateSettings({ theme: t })}
+                              className={`py-3 rounded-xl text-[10px] font-black uppercase tracking-widest border transition-all ${
+                                state.settings?.theme === t 
+                                  ? 'bg-slate-900 border-slate-900 text-white shadow-md' 
+                                  : 'bg-(--bg-card) border-(--border-base) text-(--text-muted) hover:border-(--text-base)'
+                              }`}
+                            >
+                              {t}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div>
+                        <h4 className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-4">Data Presentation</h4>
+                        <div className="flex flex-col gap-3">
+                          {(['compact', 'detailed', 'scientific'] as const).map(f => (
+                            <button
+                              key={f}
+                              onClick={() => updateSettings({ numberFormat: f })}
+                              className={`flex items-center justify-between px-6 py-4 rounded-xl border transition-all ${
+                                state.settings?.numberFormat === f
+                                  ? 'bg-slate-900 border-slate-900 text-white shadow-md'
+                                  : 'bg-(--bg-card) border-(--border-base) text-(--text-muted) hover:border-(--text-base)'
+                              }`}
+                            >
+                              <span className="text-[10px] font-black uppercase tracking-widest">{f} format</span>
+                              <span className="text-xs font-mono">{f === 'compact' ? '$1.2M' : f === 'detailed' ? '$1,250,500' : '1.25e6'}</span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="space-y-8">
+                      <div>
+                        <h4 className="text-[10px] font-black text-(--text-muted) uppercase tracking-widest mb-4">Protocol Toggles</h4>
+                        <div className="space-y-4">
+                          <div className="flex items-center justify-between p-4 bg-(--bg-base) rounded-2xl border border-(--border-base)">
+                            <div>
+                              <p className="text-xs font-black uppercase">Cloud Sync Status</p>
+                              <p className="text-[10px] text-(--text-muted) font-bold">Display save indicators</p>
+                            </div>
+                            <button 
+                              onClick={() => updateSettings({ showCloudSyncStatus: !state.settings?.showCloudSyncStatus })}
+                              className={`w-12 h-6 rounded-full transition-colors relative ${state.settings?.showCloudSyncStatus ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                            >
+                              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${state.settings?.showCloudSyncStatus ? 'right-1' : 'left-1'}`} />
+                            </button>
+                          </div>
+
+                          <div className="flex items-center justify-between p-4 bg-(--bg-base) rounded-2xl border border-(--border-base)">
+                            <div>
+                              <p className="text-xs font-black uppercase">Market Alerts</p>
+                              <p className="text-[10px] text-(--text-muted) font-bold">Hype event notifications</p>
+                            </div>
+                            <button 
+                              onClick={() => updateSettings({ notificationsEnabled: !state.settings?.notificationsEnabled })}
+                              className={`w-12 h-6 rounded-full transition-colors relative ${state.settings?.notificationsEnabled ? 'bg-emerald-500' : 'bg-slate-300'}`}
+                            >
+                              <div className={`absolute top-1 w-4 h-4 bg-white rounded-full transition-all ${state.settings?.notificationsEnabled ? 'right-1' : 'left-1'}`} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="pt-6 border-t border-(--border-base)">
+                        <h4 className="text-[10px] font-black text-rose-500 uppercase tracking-widest mb-4">Danger Zone</h4>
+                        {resetConfirmOpen ? (
+                          <div className="flex gap-2">
+                            <button
+                              onClick={resetAccount}
+                              className="flex-1 py-4 bg-rose-600 text-white rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-rose-700 transition-all active:scale-95 flex items-center justify-center gap-2 shadow-lg shadow-rose-600/20"
+                            >
+                              <RefreshCcw className="w-4 h-4 animate-spin" />
+                              CONFIRM PURGE
+                            </button>
+                            <button
+                              onClick={() => setResetConfirmOpen(false)}
+                              className="px-6 py-4 bg-slate-100 text-slate-500 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-slate-200"
+                            >
+                              CANCEL
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => setResetConfirmOpen(true)}
+                            className="w-full py-4 bg-rose-50 border border-rose-100 text-rose-600 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-rose-600 hover:text-white transition-all active:scale-95 flex items-center justify-center gap-2"
+                          >
+                            <RefreshCcw className="w-4 h-4" />
+                            Nuclear Reset
+                          </button>
+                        )}
+                        <p className="text-[10px] text-(--text-muted) text-center mt-4 font-bold uppercase tracking-tighter">Warning: All progression data will be purged</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {activeTab !== 'stocks' && activeTab !== 'settings' && (
+              <div className="mb-8 flex items-center justify-between bg-(--bg-card) border border-(--border-base) p-6 rounded-2xl shadow-sm">
                 <div className="flex items-center gap-4">
                   <div className="p-3 bg-slate-900 text-white rounded-xl">
                     <MapPin className="w-5 h-5" />
                   </div>
                   <div>
-                    <p className="text-[10px] uppercase tracking-widest text-slate-400 font-bold">Territory Control</p>
-                    <h2 className="text-lg font-black text-slate-800">{CITIES[state.currentCityIndex].name}</h2>
+                    <p className="text-[10px] uppercase tracking-widest text-(--text-muted) font-bold">Territory Control</p>
+                    <h2 className="text-lg font-black">{CITIES[state.currentCityIndex].name}</h2>
                   </div>
                 </div>
                 {state.unlockedFeatures.prestige ? (
@@ -1403,7 +1730,7 @@ export default function App() {
                     <span>Expansion</span>
                   </button>
                 ) : (
-                  <div className="flex items-center gap-2 px-5 py-2.5 bg-slate-100 text-slate-400 rounded-xl font-bold text-sm">
+                  <div className="flex items-center gap-2 px-5 py-2.5 bg-(--bg-base) text-(--text-muted) rounded-xl font-bold text-sm">
                     <RefreshCcw className="w-4 h-4 opacity-30" />
                     <span>Locked at $1M</span>
                   </div>
@@ -1422,6 +1749,7 @@ export default function App() {
                     canAfford={state.money >= calculateCost(b.baseCost, state.ownedBusinesses[b.id].level)}
                     prestigePoints={state.prestigePoints}
                     multiplier={state.activeEvent?.multiplier || 1}
+                    numberFormat={state.settings?.numberFormat || 'compact'}
                     onUpgrade={() => handleUpgrade(b.id)}
                     onManualCollect={handleManualClick}
                   />
@@ -1457,14 +1785,14 @@ export default function App() {
             onClick={() => setActiveTab('properties')}
             className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'properties' ? 'text-slate-900' : 'text-slate-400'}`}
           >
-            <Building2 className="w-5 h-5" />
-            <span className="text-[8px] font-black uppercase tracking-tighter">Estate</span>
+            <Home className="w-5 h-5" />
+            <span className="text-[8px] font-black uppercase tracking-tighter">Houses</span>
           </button>
           <button 
             onClick={() => state.unlockedFeatures.stocks && setActiveTab('stocks')}
             className={`flex flex-col items-center gap-1 transition-colors ${activeTab === 'stocks' ? 'text-slate-900' : 'text-slate-400'} ${!state.unlockedFeatures.stocks && 'opacity-20 grayscale'}`}
           >
-            <Building2 className="w-5 h-5" />
+            <TrendingUp className="w-5 h-5" />
             <span className="text-[8px] font-black uppercase tracking-tighter">Stocks</span>
           </button>
           <button 
@@ -1516,7 +1844,7 @@ export default function App() {
 
                 <div className="flex flex-col gap-3">
                   <button
-                    onClick={handlePrestige}
+                    onClick={() => setShowConfirmExpand(true)}
                     disabled={potentialPrestigePoints === 0}
                     className={`w-full py-4 rounded-xl font-bold transition-all shadow-sm ${
                       potentialPrestigePoints > 0 
@@ -1539,7 +1867,47 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Welcome Modal */}
+      {/* Expansion Confirmation Modal */}
+      <AnimatePresence>
+        {showConfirmExpand && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md"
+          >
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="bg-white border border-slate-200 w-full max-w-sm rounded-[2.5rem] p-8 shadow-2xl text-center"
+            >
+              <div className="w-16 h-16 bg-amber-50 rounded-2xl flex items-center justify-center mx-auto mb-6">
+                <RefreshCcw className="w-8 h-8 text-amber-500" />
+              </div>
+              <h3 className="text-xl font-black text-slate-900 mb-2 uppercase tracking-tight">Authorize Rebirth?</h3>
+              <p className="text-slate-500 text-[10px] font-bold mb-6 leading-relaxed uppercase tracking-wide">
+                Expansion initializes <span className="text-rose-500 font-black">TOTAL ASSET LIQUIDATION</span>. 
+                Progress resets but unlocks a <span className="text-emerald-500 font-black">PERMANENT MULTIPLIER (+{potentialPrestigePoints}%)</span> for all revenue and clicks.
+              </p>
+              <div className="space-y-3">
+                <button
+                  onClick={handlePrestige}
+                  className="w-full py-5 bg-rose-600 hover:bg-rose-700 text-white rounded-2xl font-black text-xs uppercase tracking-[0.2em] transition-all shadow-lg shadow-rose-600/20"
+                >
+                  Confirm Rebirth
+                </button>
+                <button
+                  onClick={() => setShowConfirmExpand(false)}
+                  className="w-full py-4 text-slate-400 hover:text-slate-600 font-black text-[10px] uppercase tracking-widest transition-colors"
+                >
+                  Abort Protocol
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {welcomeOpen && (
           <motion.div
@@ -1557,15 +1925,110 @@ export default function App() {
                 <Landmark className="w-12 h-12 text-emerald-400" />
               </div>
               <h1 className="text-4xl font-black text-slate-900 mb-4 tracking-tight uppercase">VENTURE</h1>
-              <p className="text-slate-500 leading-relaxed mb-12 text-lg font-medium px-4">
+              <p className="text-slate-500 leading-relaxed mb-8 text-lg font-medium px-4">
                 Redefine the landscape of global industry. Architect your legacy through strategic expansion and precise asset management.
               </p>
+              
+              <div className="mb-8 space-y-2">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest text-left ml-2">Identify Entity</p>
+                <input 
+                  type="text"
+                  placeholder="Enter Corporate Identity..."
+                  value={tempName}
+                  onChange={(e) => setTempName(e.target.value.slice(0, 20))}
+                  className="w-full px-6 py-4 bg-slate-50 border border-slate-100 rounded-2xl font-black text-slate-900 placeholder:text-slate-300 focus:outline-none focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 transition-all uppercase tracking-tight"
+                />
+              </div>
+
               <button
-                onClick={() => setWelcomeOpen(false)}
-                className="w-full py-6 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl font-black text-lg shadow-xl shadow-slate-900/20 transition-all hover:-translate-y-1 uppercase tracking-widest"
+                onClick={() => {
+                  if (tempName.trim()) {
+                    setState(prev => ({ ...prev, displayName: tempName.trim() }));
+                    setWelcomeOpen(false);
+                  }
+                }}
+                disabled={!tempName.trim()}
+                className={`w-full py-6 rounded-2xl font-black text-lg shadow-xl transition-all uppercase tracking-widest ${
+                  tempName.trim() 
+                    ? 'bg-slate-900 hover:bg-slate-800 text-white shadow-slate-900/20 hover:-translate-y-1' 
+                    : 'bg-slate-100 text-slate-300 cursor-not-allowed shadow-none'
+                }`}
               >
                 Launch Protocol
               </button>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Tutorial Modal */}
+      <AnimatePresence>
+        {tutorialOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 10 }}
+              animate={{ scale: 1, y: 0 }}
+              className="bg-white border border-slate-200 w-full max-w-xl rounded-[2.5rem] overflow-hidden shadow-2xl"
+            >
+              <div className="p-10 text-center">
+                <div className="flex items-center justify-between mb-8">
+                  <div className="text-left">
+                    <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tight">Executive Briefing</h2>
+                    <p className="text-slate-500 font-medium text-sm">Protocol for new market entrants</p>
+                  </div>
+                  <div className="w-12 h-12 bg-emerald-50 rounded-2xl flex items-center justify-center">
+                    <Sparkles className="w-6 h-6 text-emerald-500" />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-10 text-left">
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center mb-3 shadow-sm">
+                      <Coins className="w-4 h-4 text-amber-500" />
+                    </div>
+                    <h4 className="text-xs font-black text-slate-900 uppercase mb-1">Generate Capital</h4>
+                    <p className="text-[10px] text-slate-500 leading-relaxed font-medium">Capture market value by initiating manual transaction pulses at the HQ.</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center mb-3 shadow-sm">
+                      <Briefcase className="w-4 h-4 text-indigo-500" />
+                    </div>
+                    <h4 className="text-xs font-black text-slate-900 uppercase mb-1">Automated Yield</h4>
+                    <p className="text-[10px] text-slate-500 leading-relaxed font-medium">Acquire and scale industrial assets to establish passive revenue streams.</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center mb-3 shadow-sm">
+                      <TrendingUp className="w-4 h-4 text-emerald-500" />
+                    </div>
+                    <h4 className="text-xs font-black text-slate-900 uppercase mb-1">Stock Indices</h4>
+                    <p className="text-[10px] text-slate-500 leading-relaxed font-medium">Leverage market volatility. High stakes equity trading for elite capitals.</p>
+                  </div>
+                  <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
+                    <div className="w-8 h-8 bg-white rounded-lg flex items-center justify-center mb-3 shadow-sm">
+                      <Cloud className="w-4 h-4 text-sky-500" />
+                    </div>
+                    <h4 className="text-xs font-black text-slate-900 uppercase mb-1">Cloud Syncing</h4>
+                    <p className="text-[10px] text-slate-500 leading-relaxed font-medium">Authorize via Google to persist your enterprise across all terminals.</p>
+                  </div>
+                </div>
+
+                <div className="space-y-3">
+                  <button
+                    onClick={() => setTutorialOpen(false)}
+                    className="w-full py-5 bg-slate-900 hover:bg-slate-800 text-white rounded-2xl font-black text-sm shadow-xl shadow-slate-900/20 transition-all uppercase tracking-widest"
+                  >
+                    Confirm Understanding
+                  </button>
+                  <p className="text-[10px] font-bold text-amber-500 uppercase tracking-widest mt-4">
+                    Note: Unauthenticated progress is session-only
+                  </p>
+                </div>
+              </div>
             </motion.div>
           </motion.div>
         )}

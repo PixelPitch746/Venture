@@ -84,7 +84,17 @@ export interface LeaderboardEntry {
   lastUpdated: any;
 }
 
+export type CurrencyFormat = 'compact' | 'scientific' | 'detailed';
+
+export interface GameSettings {
+  numberFormat: CurrencyFormat;
+  theme: 'cyber' | 'minimal' | 'dark';
+  showCloudSyncStatus: boolean;
+  notificationsEnabled: boolean;
+}
+
 export interface GameState {
+  displayName: string;
   money: number;
   totalEarned: number;
   gameDate: number; // days since 2000-01-01
@@ -107,4 +117,5 @@ export interface GameState {
   };
   lastSaved: number;
   currentCityIndex: number;
+  settings?: GameSettings;
 }

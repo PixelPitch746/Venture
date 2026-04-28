@@ -33,16 +33,16 @@ export const StockCard: React.FC<StockCardProps> = ({
   const maxAffordable = Math.floor(money / price);
 
   return (
-    <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm hover:shadow-md transition-all">
+    <div className="bg-(--bg-card) border border-(--border-base) rounded-2xl p-6 shadow-sm hover:shadow-md transition-all">
       <div className="flex justify-between items-start mb-2">
         <div>
           <div className="flex items-center gap-2">
-            <h3 className="font-black text-slate-900 tracking-tight">{stock.name}</h3>
-            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-100 ${stock.color}`}>
+            <h3 className="font-black tracking-tight">{stock.name}</h3>
+            <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded bg-(--bg-base) ${stock.color}`}>
               {stock.symbol}
             </span>
           </div>
-          <p className="text-2xl font-black text-slate-800 mt-1">{formatCurrency(price)}</p>
+          <p className="text-2xl font-black mt-1">{formatCurrency(price)}</p>
         </div>
         <div className={`flex items-center gap-1 font-bold text-sm ${isUp ? 'text-emerald-500' : 'text-rose-500'}`}>
           {isUp ? <TrendingUp className="w-4 h-4" /> : <TrendingDown className="w-4 h-4" />}
@@ -72,21 +72,21 @@ export const StockCard: React.FC<StockCardProps> = ({
         </ResponsiveContainer>
       </div>
 
-      <div className="flex flex-col gap-3 p-3 bg-slate-50 rounded-xl mb-6 border border-slate-100">
+      <div className="flex flex-col gap-3 p-3 bg-(--bg-base) rounded-xl mb-6 border border-(--border-base)">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2 text-slate-500">
+          <div className="flex items-center gap-2 text-(--text-muted)">
             <Wallet className="w-4 h-4" />
             <span className="text-xs font-bold uppercase tracking-wider">Your Position</span>
           </div>
           <div className="text-right">
-            <p className="text-sm font-black text-slate-800">{holding.shares} Shares</p>
-            <p className="text-[10px] font-bold text-slate-400">Equity: {formatCurrency(holding.shares * price)}</p>
+            <p className="text-sm font-black">{holding.shares} Shares</p>
+            <p className="text-[10px] font-bold text-(--text-muted)">Equity: {formatCurrency(holding.shares * price)}</p>
           </div>
         </div>
         
         {holding.shares > 0 && (
-          <div className="flex items-center justify-between pt-2 border-t border-slate-200">
-            <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Net Profit/Loss</div>
+          <div className="flex items-center justify-between pt-2 border-t border-(--border-base)">
+            <div className="text-[10px] font-bold text-(--text-muted) uppercase tracking-wider">Net Profit/Loss</div>
             <div className="text-right">
               <p className={`text-xs font-black ${price >= holding.avgBuyPrice ? 'text-emerald-500' : 'text-rose-500'}`}>
                 {price >= holding.avgBuyPrice ? '+' : ''}{formatCurrency((price - holding.avgBuyPrice) * holding.shares)}
@@ -103,28 +103,28 @@ export const StockCard: React.FC<StockCardProps> = ({
         <button
           onClick={() => onBuy(1)}
           disabled={money < price}
-          className="py-2.5 bg-slate-900 text-white rounded-lg font-bold text-xs uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition-all"
+          className="py-2.5 bg-slate-900 text-white rounded-lg font-bold text-xs uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-800 transition-all font-sans"
         >
           Buy 1
         </button>
         <button
           onClick={() => onSell(1)}
           disabled={holding.shares <= 0}
-          className="py-2.5 bg-white border border-slate-200 text-slate-600 rounded-lg font-bold text-xs uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-slate-50 transition-all"
+          className="py-2.5 bg-(--bg-card) border border-(--border-base) text-(--text-base) rounded-lg font-bold text-xs uppercase tracking-widest disabled:opacity-30 disabled:cursor-not-allowed hover:bg-(--bg-base) transition-all font-sans"
         >
           Sell 1
         </button>
         <button
           onClick={() => onBuy(maxAffordable)}
           disabled={maxAffordable <= 0}
-          className="py-2 bg-emerald-500/10 text-emerald-600 rounded-lg font-black text-[10px] uppercase tracking-widest disabled:opacity-30 transition-all"
+          className="py-2 bg-emerald-500/10 text-emerald-600 rounded-lg font-black text-[10px] uppercase tracking-widest disabled:opacity-30 transition-all font-sans"
         >
           Buy Max ({maxAffordable})
         </button>
         <button
           onClick={() => onSell(holding.shares)}
           disabled={holding.shares <= 0}
-          className="py-2 bg-rose-500/10 text-rose-600 rounded-lg font-black text-[10px] uppercase tracking-widest disabled:opacity-30 transition-all"
+          className="py-2 bg-rose-500/10 text-rose-600 rounded-lg font-black text-[10px] uppercase tracking-widest disabled:opacity-30 transition-all font-sans"
         >
           Sell All
         </button>

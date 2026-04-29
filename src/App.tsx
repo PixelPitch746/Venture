@@ -508,8 +508,7 @@ export default function App() {
         updatedAt: serverTimestamp()
       });
       
-      const totalWealth = currentState.money + STOCKS.reduce((acc, s) => acc + (currentState.holdings[s.symbol]?.shares || 0) * currentState.stockPrices[s.symbol], 0);
-      await updateGlobalLeaderboard(uId, totalWealth, currentState.displayName);
+      await updateGlobalLeaderboard(uId, currentState.money, currentState.displayName);
       
       setIsCloudSyncing(false);
     } catch (error) {
@@ -768,21 +767,16 @@ export default function App() {
 
   const handlePrestige = () => {
     if (potentialPrestigePoints > 0) {
-      setState(prev => ({
+      const newPrestigePoints = state.prestigePoints + potentialPrestigePoints;
+      
+      setState({
         ...INITIAL_STATE,
-        displayName: prev.displayName, // Keep identity
-        money: 0,
-        ownedBusinesses: INITIAL_STATE.ownedBusinesses,
-        prestigePoints: prev.prestigePoints + potentialPrestigePoints,
-        prestigeCount: prev.prestigeCount + 1,
-        totalEarned: 0,
-        unlockedFeatures: prev.unlockedFeatures,
-        settings: prev.settings,
-        holdings: {},
-        properties: [],
-        stockPrices: INITIAL_STATE.stockPrices,
-        stockHistory: INITIAL_STATE.stockHistory,
-      }));
+        displayName: state.displayName, // Keep identity
+        prestigePoints: newPrestigePoints,
+        prestigeCount: state.prestigeCount + 1,
+        settings: state.settings, // Keep user settings
+      });
+      
       setPrestigeTabOpen(false);
       setShowConfirmExpand(false);
     }
@@ -1036,10 +1030,19 @@ export default function App() {
               <div className="bg-(--bg-card) border border-(--border-base) rounded-[2.5rem] p-8 md:p-12 shadow-sm">
                 <div className="flex flex-col md:flex-row justify-between items-start md:items-end gap-6 mb-10">
                   <div>
-                    <p className="text-[10px] uppercase font-black text-(--text-muted) tracking-[0.2em] mb-3">Portfolio Value</p>
-                    <h2 className="text-5xl md:text-7xl font-black tracking-tight leading-none">
-                      {formatCurrency(state.money + STOCKS.reduce((acc, s) => acc + (state.holdings[s.symbol]?.shares || 0) * state.stockPrices[s.symbol], 0))}
-                    </h2>
+                    <div className="flex items-center gap-6">
+                      <div>
+                        <p className="text-[10px] uppercase font-black text-(--text-muted) tracking-[0.2em] mb-3">Portfolio Value</p>
+                        <h2 className="text-5xl md:text-7xl font-black tracking-tight leading-none">
+                          {formatCurrency(state.money + STOCKS.reduce((acc, s) => acc + (state.holdings[s.symbol]?.shares || 0) * state.stockPrices[s.symbol], 0))}
+                        </h2>
+                      </div>
+                      <div className="hidden md:block w-px h-12 bg-(--border-base) opacity-50 mt-4 rounded-full"></div>
+                      <div>
+                        <p className="text-[10px] uppercase font-black text-emerald-500 tracking-[0.2em] mb-3">Cash Balance</p>
+                        <p className="text-3xl md:text-4xl font-black tracking-tight leading-none">{formatCurrency(state.money)}</p>
+                      </div>
+                    </div>
                     <div className="flex items-center gap-4 mt-5">
                       <div className="px-3 py-1 bg-emerald-50 rounded-full border border-emerald-100 flex items-center gap-1.5">
                         <TrendingUp className="w-3.5 h-3.5 text-emerald-600" />
@@ -1528,7 +1531,7 @@ export default function App() {
                               </div>
                               <div className="text-right">
                                 <p className={`font-black text-lg ${isPlayer ? 'text-emerald-400' : ''}`}>{formatCurrency(entry.wealth)}</p>
-                                <p className="text-[10px] font-bold text-(--text-muted) uppercase">Net Worth</p>
+                                <p className="text-[10px] font-bold text-(--text-muted) uppercase">Cash Money</p>
                               </div>
                             </div>
                           );
@@ -1550,8 +1553,8 @@ export default function App() {
                               </div>
                             </div>
                             <div className="text-right">
-                              <p className="font-black text-lg text-emerald-400">{formatCurrency(state.money + STOCKS.reduce((acc, s) => acc + (state.holdings[s.symbol]?.shares || 0) * state.stockPrices[s.symbol], 0))}</p>
-                              <p className="text-[10px] font-bold text-slate-400 uppercase">Valuation</p>
+                              <p className="font-black text-lg text-emerald-400">{formatCurrency(state.money)}</p>
+                              <p className="text-[10px] font-bold text-slate-400 uppercase">Cash Money</p>
                             </div>
                           </div>
                         </div>
@@ -1888,7 +1891,8 @@ export default function App() {
               <h3 className="text-xl font-black text-slate-900 mb-2 uppercase tracking-tight">Authorize Rebirth?</h3>
               <p className="text-slate-500 text-[10px] font-bold mb-6 leading-relaxed uppercase tracking-wide">
                 Expansion initializes <span className="text-rose-500 font-black">TOTAL ASSET LIQUIDATION</span>. 
-                Progress resets but unlocks a <span className="text-emerald-500 font-black">PERMANENT MULTIPLIER (+{potentialPrestigePoints}%)</span> for all revenue and clicks.
+                All businesses, houses, and market positions will be <span className="text-rose-500 font-black">RESET</span>. 
+                Gain a permanent <span className="text-emerald-500 font-black">+{potentialPrestigePoints * 2}% REVENUE BONUS</span> across all future ventures.
               </p>
               <div className="space-y-3">
                 <button
